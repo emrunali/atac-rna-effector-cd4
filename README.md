@@ -143,23 +143,9 @@ Directional overlap (proximal DAR gene × DEG, *n* = 129):
 
 ## Citation
 
-If you use this code, please cite the original atlas publication and GEO accessions **GSE118165** (RNA) and **GSE118189** (ATAC).
+1. Calderon D, Nguyen MLT, Mezger A, Kathiria A, Müller F, Nguyen V, Lescano N, Wu B, Trombetta J, Ribado JV, Knowles DA, Gao Z, Blaeschke F, Parent AV, Burt TD, Anderson MS, Criswell LA, Greenleaf WJ, Marson A, Pritchard JK. Landscape of stimulation-responsive chromatin across diverse human immune cells. Nat Genet. 2019 Oct;51(10):1494-1505. doi: 10.1038/s41588-019-0505-9. Epub 2019 Sep 30. PMID: 31570894; PMCID: PMC6858557.
 
----
-
-## Publish to GitHub
-
-A local git repository is initialized in this folder. To create the remote under [emrunali](https://github.com/emrunali):
-
-```bash
-cd final_analysis   # or your clone path
-git add LICENSE && git commit -m "Add MIT license"   # if not already committed
-git remote add origin https://github.com/emrunali/atac-rna-effector-cd4.git
-git branch -M main
-git push -u origin main
-```
-
-Create the empty repository on GitHub first (**New repository** → name `atac-rna-effector-cd4`, public, no README). Or with GitHub CLI: `gh repo create atac-rna-effector-cd4 --public --source=. --push`.
+Note: If you use this code, please cite the original atlas publication and GEO accessions **GSE118165** (RNA) and **GSE118189** (ATAC).
 
 ---
 
