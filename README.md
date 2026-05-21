@@ -109,7 +109,7 @@ Volcano labels and supplementary-table ranks recover the **expected T cell activ
 - **Immediate-early transcription factors:** *FOS*, *FOSB*, *JUN* family (RNA and/or ATAC-linked peaks).
 - **Cytokine / effector genes:** *IL2*, *IL21*, and related stimulation-induced transcripts (RNA).
 - **Cytotoxic / effector-associated genes** seen in activated T profiles (e.g. *GZMB* in comparable analyses).
-- **Th17 / inflammatory axis** (*IL17A* / *IL17F* class genes where expressed in this subset).
+- **Th17 / inflammatory axis:** *IL17F* (and related stimulation-induced genes in this subset).
 - **Coordinated chromatin–expression changes:** among genes significant in **both** assays at proximal promoters/enhancers, the majority show **open & up** (78 genes) or **open & down** / **closed & down** patterns matching directional accessibility–expression coupling in the paper’s framework (13 closed & down, 36 open & down, 2 closed & up).
 
 Directional overlap (proximal DAR gene × DEG, *n* = 129):
@@ -147,6 +147,22 @@ If you use this code, please cite the original atlas publication and GEO accessi
 
 ---
 
+## Publish to GitHub
+
+A local git repository is initialized in this folder. To create the remote under [emrunali](https://github.com/emrunali):
+
+```bash
+cd final_analysis   # or your clone path
+git add LICENSE && git commit -m "Add MIT license"   # if not already committed
+git remote add origin https://github.com/emrunali/atac-rna-effector-cd4.git
+git branch -M main
+git push -u origin main
+```
+
+Create the empty repository on GitHub first (**New repository** → name `atac-rna-effector-cd4`, public, no README). Or with GitHub CLI: `gh repo create atac-rna-effector-cd4 --public --source=. --push`.
+
+---
+
 ## License
 
-MIT — see repository license file.
+MIT — see [LICENSE](LICENSE).
