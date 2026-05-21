@@ -1,0 +1,23 @@
+# R / knitr
+*.knit.md
+.Rhistory
+.Rproj.user
+
+# OS
+.DS_Store
+
+# Local render logs
+render_02.log
+results/*.log
+
+# Very large PDF (volcano is embedded in the HTML report)
+results/volcano_ATAC_effector_CD4.pdf
+
+# GEO matrices (user downloads — see data/README.md)
+data/GSE118189_ATAC_counts.txt.gz
+data/GSE118165_raw_counts_GRCh38.p13_NCBI.tsv
+data/GSE118165_raw_counts_GRCh38.p13_NCBI.tsv.gz
+data/Supplementary_tables.xlsx
+
+# Large paper supplementary peak table (~40 MB; download from publication)
+Supplementary_data_3_ATAC_stimulation_DA_peaks.txt

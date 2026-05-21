@@ -1,0 +1,700 @@
+---
+title: "Final analysis (2/2) — Effector CD4+ PCA, limma-voom DE/DAR, integration, vs paper Supp Data 3–4"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.path = "results/figure-html-02/",
+  dpi = 120
+)
+dir.create("results/figure-html-02/", recursive = TRUE, showWarnings = FALSE)
+dir.create("results", showWarnings = FALSE)
+
+repo_root <- if (dir.exists("data")) normalizePath(".") else normalizePath("..")
+if (!dir.exists(file.path(repo_root, "data"))) {
+  stop("Place GEO count matrices in data/ (see data/README.md).")
+}
+
+if (!rmarkdown::pandoc_available()) {
+  for (brew_bin in c("/opt/homebrew/bin", "/usr/local/bin")) {
+    if (file.exists(file.path(brew_bin, "pandoc"))) {
+      Sys.setenv(PATH = paste(brew_bin, Sys.getenv("PATH"), sep = .Platform$path.sep))
+      break
+    }
+  }
+}
+
+.run_step <- function(label) {
+  cat("\n[", format(Sys.time(), "%H:%M:%S"), "] ", label, "\n", sep = "")
+  flush.console()
+}
+```
+
+**Paper methods mirrored here**
+
+- **RNA:** **CPM > 10** in ≥ 2 Effector CD4+ libraries, then keep **`GENETYPE == "protein-coding"`** (annotation via `mapIds` **only on CPM-passing genes**, ~8k—not the full matrix). *Order note:* the paper states protein-coding first then CPM; swapping to **CPM then protein-coding** matches the atlas notebooks and keeps annotation cheap. **TMM**; **voom**; **limma** with **`duplicateCorrelation(block = donor)`**; **BH *q* \< 0.01** and **\|log2FC\| \> 1** for DEGs.
+- **ATAC:** **CPM ≥ 1** in ≥ 2 samples on the **full** atlas, then Effector CD4+ columns; **TMM**; **voom**; **limma** with **TSS enrichment** covariate and **donor** via **`duplicateCorrelation`**; **BH \< 0.01** and **\|log2FC\| \> 1** for DARs.
+- **Integration:** proximal DAR genes (ChIPseeker ±50 kb TSS) vs DEG symbols; Venn; scatter of log2FC.
+- **Paper tables:** `Supplementary_data_3_ATAC_stimulation_DA_peaks.txt` and `Supplementary_data_4_RNA_stimulation_DE_genes.txt` (contrast `Effector_CD4pos_T_S-Effector_CD4pos_T_U`) for rank / logFC agreement.
+
+**Runtime (same ballpark as `paper_aligned_atlas_filter/`):** run **`01_matrices_metadata.Rmd` first** (seconds). This notebook spends most time on **(1)** reading full ATAC + RNA counts, **(2)** **voom** on the atlas-filtered peak matrix, and **(3)** ChIPseeker. **Progress:** use **`rmarkdown::render(..., quiet = FALSE)`** from the shell (or **Knit** in RStudio) so you see **`i/n [chunk-name]`**; each heavy chunk starts with **`.run_step("02 — …")`** so the **HTML** also records what ran.
+
+```{r libraries}
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(readxl)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db)
+library(GenomicRanges)
+library(VennDiagram)
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+```
+
+# Paths
+
+```{r paths}
+.run_step("02 — paths and file checks")
+path_atac <- file.path(repo_root, "data", "GSE118189_ATAC_counts.txt.gz")
+path_rna_gz <- file.path(repo_root, "data", "GSE118165_raw_counts_GRCh38.p13_NCBI.tsv.gz")
+path_rna_plain <- file.path(repo_root, "data", "GSE118165_raw_counts_GRCh38.p13_NCBI.tsv")
+path_gsm_map <- file.path(repo_root, "data", "GSE118165_GSM_to_sample_id.tsv")
+path_meta <- if (repo_root == normalizePath(".")) "sample_metadata.txt" else file.path(repo_root, "final_analysis", "sample_metadata.txt")
+path_qc <- file.path(repo_root, "data", "Supplementary_tables.xlsx")
+path_paper_atac <- file.path(repo_root, "Supplementary_data_3_ATAC_stimulation_DA_peaks.txt")
+path_paper_rna <- file.path(repo_root, "Supplementary_data_4_RNA_stimulation_DE_genes.txt")
+qc_sheet <- "ATAC-seq samle QC"
+out_dir <- "results"
+paper_contrast <- "Effector_CD4pos_T_S-Effector_CD4pos_T_U"
+paper_rna_n_genes <- 13512L
+paper_atac_n_peaks <- 671448L
+
+path_rna <- if (file.exists(path_rna_gz)) path_rna_gz else path_rna_plain
+rna_open <- if (grepl("\\.gz$", path_rna)) function() gzfile(path_rna, "rt") else function() file(path_rna, "rt")
+
+stopifnot(
+  file.exists(path_atac),
+  file.exists(path_rna),
+  file.exists(path_gsm_map),
+  file.exists(path_meta),
+  file.exists(path_qc),
+  file.exists(path_paper_atac),
+  file.exists(path_paper_rna)
+)
+```
+
+```{r load-meta-tss}
+.run_step("02 — read metadata + TSS QC")
+meta <- read.table(path_meta, header = TRUE, sep = "\t", row.names = 1, check.names = FALSE)
+if ("in_atac" %in% colnames(meta)) meta$in_atac <- NULL
+if ("in_rna" %in% colnames(meta)) meta$in_rna <- NULL
+
+qc <- read_excel(path_qc, sheet = qc_sheet)
+qc_tss <- qc %>%
+  dplyr::distinct(.data$sample, .keep_all = TRUE) %>%
+  dplyr::select(sample = .data$sample, tss_enrichment = .data$tss_enrichment)
+```
+
+# Load full matrices
+
+```{r load-atac}
+.run_step("02 — load full ATAC matrix (I/O + parse; can take several minutes)")
+atac_raw <- read.table(
+  gzfile(path_atac),
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE
+)
+atac_full <- as.matrix(atac_raw)
+storage.mode(atac_full) <- "double"
+rm(atac_raw)
+gc(verbose = FALSE)
+dim(atac_full)
+```
+
+```{r load-rna}
+.run_step("02 — load full RNA counts + rename GSM → sample_id")
+rna_raw <- read.table(
+  rna_open(),
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE
+)
+rna_full <- as.matrix(rna_raw)
+storage.mode(rna_full) <- "double"
+gsm_map <- read.table(path_gsm_map, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+stopifnot(all(colnames(rna_full) %in% gsm_map$GSM))
+colnames(rna_full) <- gsm_map$sample_id[match(colnames(rna_full), gsm_map$GSM)]
+rm(rna_raw)
+gc(verbose = FALSE)
+dim(rna_full)
+```
+
+# Effector CD4+ samples (both assays)
+
+```{r subset-samples}
+.run_step("02 — subset to Effector CD4+ samples present in both assays")
+in_both <- intersect(colnames(atac_full), colnames(rna_full))
+keep_samples <- intersect(
+  rownames(meta)[meta$cell_type == "Effector_CD4pos_T"],
+  in_both
+)
+length(keep_samples)
+
+meta_sub <- meta[keep_samples, , drop = FALSE]
+meta_sub$donor <- factor(meta_sub$donor)
+meta_sub$condition <- factor(meta_sub$condition, levels = c("resting", "stimulated"))
+
+knitr::kable(
+  as.data.frame.matrix(table(meta_sub$donor, meta_sub$condition)),
+  caption = "Donor × condition (Effector CD4+)"
+)
+
+cd <- meta_sub %>%
+  tibble::rownames_to_column("sample") %>%
+  left_join(qc_tss, by = "sample") %>%
+  tibble::column_to_rownames("sample")
+stopifnot(!any(is.na(cd$tss_enrichment)))
+cd$tss_z <- as.numeric(scale(cd$tss_enrichment))
+```
+
+# ATAC: atlas-wide CPM, then CD4+ | RNA: CPM > 10 (CD4+), then protein-coding + `mapIds` only on retained genes
+
+```{r filters}
+.run_step("02 — ATAC atlas CPM filter + RNA CPM + protein-coding + mapIds (small sets)")
+dge_atac_full <- DGEList(counts = atac_full)
+keep_atac_peaks <- rowSums(cpm(dge_atac_full) >= 1) >= 2L
+atac_filtered <- atac_full[keep_atac_peaks, , drop = FALSE]
+atac_sub <- atac_filtered[, keep_samples, drop = FALSE]
+
+rna_cd4 <- rna_full[, keep_samples, drop = FALSE]
+dge_rna_cell <- DGEList(counts = rna_cd4)
+keep_rna_cpm <- rowSums(cpm(dge_rna_cell) > 10) >= 2L
+rna_after_cpm <- rna_cd4[keep_rna_cpm, , drop = FALSE]
+
+## `mapIds` on CPM-passing genes only (~8k), not the full count matrix.
+gene_type <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(rna_after_cpm),
+  column = "GENETYPE",
+  keytype = "ENTREZID",
+  multiVals = "first"
+)
+keep_pc <- !is.na(gene_type) & gene_type == "protein-coding"
+rna_sub <- rna_after_cpm[keep_pc, , drop = FALSE]
+
+entrez_ids <- rownames(rna_sub)
+sym_rna <- mapIds(
+  org.Hs.eg.db,
+  keys = entrez_ids,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first"
+)
+ens_rna <- mapIds(
+  org.Hs.eg.db,
+  keys = entrez_ids,
+  column = "ENSEMBL",
+  keytype = "ENTREZID",
+  multiVals = "first"
+)
+gene_symbol_rna <- ifelse(is.na(sym_rna), entrez_ids, sym_rna)
+names(gene_symbol_rna) <- entrez_ids
+gene_ensembl_rna <- ifelse(is.na(ens_rna), NA_character_, ens_rna)
+names(gene_ensembl_rna) <- entrez_ids
+
+cat(
+  "RNA genes after CPM>10 in ≥2 CD4+ libraries:", sum(keep_rna_cpm),
+  "\n  …protein-coding subset:", nrow(rna_sub), "\n"
+)
+
+knitr::kable(data.frame(
+  n_effector_libraries = length(keep_samples),
+  n_atac_peaks_tested = nrow(atac_sub),
+  paper_atac_peaks = paper_atac_n_peaks,
+  n_rna_genes_tested = nrow(rna_sub),
+  paper_rna_genes = paper_rna_n_genes
+), caption = "Test set sizes vs paper (GEO matrices may differ).")
+```
+
+# PCA — RNA (log-CPM, top 500 SD genes)
+
+```{r pca-rna, fig.height=5.5, fig.width=6}
+.run_step("02 — PCA RNA")
+dge_rna_pca <- DGEList(counts = rna_sub[, keep_samples, drop = FALSE])
+dge_rna_pca <- calcNormFactors(dge_rna_pca, method = "TMM")
+lcpm_rna <- cpm(dge_rna_pca, log = TRUE)
+sdv <- apply(lcpm_rna, 1, stats::sd)
+top_g <- order(sdv, decreasing = TRUE)[seq_len(min(500L, length(sdv)))]
+X <- t(lcpm_rna[top_g, , drop = FALSE])
+pc <- prcomp(X, center = TRUE, scale. = TRUE)
+pv <- summary(pc)$importance[2, 1:2]
+pc_df <- data.frame(
+  sample = rownames(X),
+  PC1 = pc$x[, 1],
+  PC2 = pc$x[, 2],
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    meta_sub %>% tibble::rownames_to_column("sample"),
+    by = "sample"
+  )
+
+ggplot(pc_df, aes(.data$PC1, .data$PC2, color = .data$condition, label = .data$sample)) +
+  geom_point(size = 3, alpha = 0.85) +
+  ggrepel::geom_text_repel(size = 2.5, max.overlaps = 20) +
+  labs(
+    title = "RNA PCA (Effector CD4+)",
+    subtitle = sprintf("log-CPM, top %d variable protein-coding genes; Var: PC1=%.1f%% PC2=%.1f%%", length(top_g), 100 * pv[1], 100 * pv[2]),
+    x = "PC1",
+    y = "PC2"
+  ) +
+  theme_bw()
+ggsave(file.path(out_dir, "pca_RNA_effector_CD4.pdf"), width = 6, height = 5.5)
+```
+
+# PCA — ATAC (log-CPM, random 25k peaks for speed)
+
+```{r pca-atac, fig.height=5.5, fig.width=6}
+.run_step("02 — PCA ATAC (25k random peaks)")
+set.seed(1)
+dge_atac_pca <- DGEList(counts = atac_sub)
+dge_atac_pca <- calcNormFactors(dge_atac_pca, method = "TMM")
+lcpm_atac <- cpm(dge_atac_pca, log = TRUE)
+nr <- nrow(lcpm_atac)
+take <- sample.int(nr, min(25000L, nr))
+Xa <- t(lcpm_atac[take, , drop = FALSE])
+pca <- prcomp(Xa, center = TRUE, scale. = TRUE)
+pva <- summary(pca)$importance[2, 1:2]
+pca_df <- data.frame(
+  sample = rownames(Xa),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  stringsAsFactors = FALSE
+) %>%
+  left_join(
+    meta_sub %>% tibble::rownames_to_column("sample"),
+    by = "sample"
+  )
+
+ggplot(pca_df, aes(.data$PC1, .data$PC2, color = .data$condition, label = .data$sample)) +
+  geom_point(size = 3, alpha = 0.85) +
+  ggrepel::geom_text_repel(size = 2.5, max.overlaps = 20) +
+  labs(
+    title = "ATAC PCA (Effector CD4+)",
+    subtitle = sprintf("log-CPM on %d random subset peaks; Var: PC1=%.1f%% PC2=%.1f%%", length(take), 100 * pva[1], 100 * pva[2]),
+    x = "PC1",
+    y = "PC2"
+  ) +
+  theme_bw()
+ggsave(file.path(out_dir, "pca_ATAC_effector_CD4.pdf"), width = 6, height = 5.5)
+```
+
+# limma — ATAC
+
+```{r limma-atac}
+.run_step("02 — limma-voom ATAC (slow: large peak matrix)")
+dge_atac <- DGEList(counts = atac_sub)
+dge_atac <- calcNormFactors(dge_atac, method = "TMM")
+
+design_atac <- model.matrix(~ tss_z + condition, data = cd)
+v_atac <- voom(dge_atac, design_atac, plot = FALSE)
+cor_atac <- duplicateCorrelation(v_atac, design_atac, block = cd$donor)
+fit_atac <- lmFit(
+  v_atac,
+  design_atac,
+  block = cd$donor,
+  correlation = cor_atac$consensus
+)
+fit_atac <- eBayes(fit_atac)
+
+tt_atac <- topTable(
+  fit_atac,
+  coef = "conditionstimulated",
+  number = Inf,
+  sort.by = "none",
+  adjust.method = "BH"
+)
+tt_atac$peak_id <- rownames(tt_atac)
+
+sig_atac <- tt_atac %>%
+  filter(.data$adj.P.Val < 0.01, abs(.data$logFC) > 1)
+cat("DARs q<0.01, |logFC|>1 — up:", sum(sig_atac$logFC > 0), " down:", sum(sig_atac$logFC < 0), "\n")
+cor_atac$consensus
+```
+
+# limma — RNA
+
+```{r limma-rna}
+.run_step("02 — limma-voom RNA")
+dge_rna <- DGEList(counts = rna_sub)
+dge_rna <- calcNormFactors(dge_rna, method = "TMM")
+
+design_rna <- model.matrix(~ condition, data = cd)
+v_rna <- voom(dge_rna, design_rna, plot = FALSE)
+cor_rna <- duplicateCorrelation(v_rna, design_rna, block = cd$donor)
+fit_rna <- lmFit(
+  v_rna,
+  design_rna,
+  block = cd$donor,
+  correlation = cor_rna$consensus
+)
+fit_rna <- eBayes(fit_rna)
+
+tt_rna <- topTable(
+  fit_rna,
+  coef = "conditionstimulated",
+  number = Inf,
+  sort.by = "none",
+  adjust.method = "BH"
+)
+tt_rna$gene_id <- rownames(tt_rna)
+tt_rna$SYMBOL <- unname(gene_symbol_rna[tt_rna$gene_id])
+tt_rna$ENSEMBL <- unname(gene_ensembl_rna[tt_rna$gene_id])
+
+sig_rna <- tt_rna %>%
+  filter(.data$adj.P.Val < 0.01, abs(.data$logFC) > 1)
+cat("Genes in voom:", nrow(dge_rna), "\n")
+cat("DEGs q<0.01, |logFC|>1 — up:", sum(sig_rna$logFC > 0), " down:", sum(sig_rna$logFC < 0), "\n")
+cor_rna$consensus
+```
+
+# Volcano plots
+
+```{r volcano-fn}
+volcano_limma <- function(tt, id_col, label_map, title, outfile,
+                          lfc_cut = 1, q_cut = 0.01,
+                          sig_color = "#c0392b", ns_color = "grey82") {
+  feat <- tt[[id_col]]
+  lab_txt <- unname(label_map[feat])
+  lab_txt[is.na(lab_txt)] <- feat[is.na(lab_txt)]
+
+  df <- tt %>%
+    mutate(
+      neglog10q = pmin(-log10(.data$adj.P.Val), 50, na.rm = TRUE),
+      sig = !is.na(.data$adj.P.Val) & .data$adj.P.Val < q_cut & abs(.data$logFC) > lfc_cut,
+      lab_text = lab_txt,
+      rank_score = -log10(.data$adj.P.Val) * abs(.data$logFC)
+    )
+
+  n_sig_up <- sum(df$sig & df$logFC > 0, na.rm = TRUE)
+  n_sig_down <- sum(df$sig & df$logFC < 0, na.rm = TRUE)
+
+  to_label <- bind_rows(
+    df %>% filter(.data$sig, .data$logFC > 0) %>% arrange(desc(.data$rank_score)) %>% head(20),
+    df %>% filter(.data$sig, .data$logFC < 0) %>% arrange(desc(.data$rank_score)) %>% head(20)
+  ) %>%
+    mutate(
+      lab = ifelse(nchar(as.character(.data$lab_text)) > 40,
+        paste0(substr(.data$lab_text, 1, 37), "..."),
+        as.character(.data$lab_text)
+      )
+    )
+
+  subt <- sprintf(
+    "Sig. up: %d  |  Sig. down: %d  (q<%.2g, |logFC|>%.1f)",
+    n_sig_up, n_sig_down, q_cut, lfc_cut
+  )
+
+  p <- ggplot(df, aes(logFC, neglog10q, color = sig)) +
+    geom_point(alpha = 0.35, size = 0.85) +
+    scale_color_manual(values = c("FALSE" = ns_color, "TRUE" = sig_color), guide = "none") +
+    geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", color = "grey45") +
+    geom_hline(yintercept = -log10(q_cut), linetype = "dashed", color = "grey45") +
+    ggrepel::geom_text_repel(
+      data = to_label,
+      aes(label = .data$lab),
+      color = "grey15",
+      size = 2.8,
+      max.overlaps = 100,
+      min.segment.length = 0,
+      box.padding = 0.35,
+      inherit.aes = TRUE
+    ) +
+    labs(title = title, subtitle = subt, x = "log2 FC (stim / rest)", y = expression(-log[10] ~ "q")) +
+    theme_bw(base_size = 11)
+
+  ggsave(file.path(out_dir, outfile), p, width = 7.5, height = 6.5)
+  p
+}
+```
+
+```{r volcano-atac}
+.run_step("02 — volcano ATAC")
+peak_lab <- tt_atac$peak_id
+names(peak_lab) <- tt_atac$peak_id
+volcano_limma(
+  tt_atac, "peak_id", peak_lab,
+  "ATAC volcano (Effector CD4+)",
+  "volcano_ATAC_effector_CD4.pdf",
+  sig_color = "#d62728"
+)
+```
+
+```{r volcano-rna}
+.run_step("02 — volcano RNA")
+volcano_limma(
+  tt_rna, "gene_id", gene_symbol_rna,
+  "RNA volcano (Effector CD4+, protein-coding, Entrez)",
+  "volcano_RNA_effector_CD4.pdf",
+  sig_color = "#1f77b4"
+)
+```
+
+# ChIPseeker overlap, Venn, scatter
+
+```{r parse-peaks}
+parse_peak_id_to_parts <- function(peak_ids) {
+  t(vapply(peak_ids, FUN.VALUE = character(3), function(id) {
+    p <- strsplit(id, "_", fixed = TRUE)[[1]]
+    n <- length(p)
+    if (n < 3) return(c(NA_character_, NA_character_, NA_character_))
+    c(paste(p[seq_len(n - 2)], collapse = "_"), p[n - 1], p[n])
+  }))
+}
+```
+
+```{r chipseeker}
+.run_step("02 — ChIPseeker annotate DAR peaks (can take a while if many DARs)")
+DARs_df <- sig_atac
+peak_coords <- parse_peak_id_to_parts(DARs_df$peak_id)
+peak_start <- suppressWarnings(as.integer(peak_coords[, 2]))
+peak_end <- suppressWarnings(as.integer(peak_coords[, 3]))
+peak_ok <- !is.na(peak_coords[, 1]) & !is.na(peak_start) & !is.na(peak_end) & peak_end >= peak_start
+DARs_df <- DARs_df[peak_ok, , drop = FALSE]
+peak_coords <- peak_coords[peak_ok, , drop = FALSE]
+peak_start <- peak_start[peak_ok]
+peak_end <- peak_end[peak_ok]
+
+DARs_gr <- GRanges(
+  seqnames = peak_coords[, 1],
+  ranges = IRanges(start = peak_start, end = peak_end),
+  peak_id = DARs_df$peak_id,
+  atac_lfc = DARs_df$logFC,
+  atac_q = DARs_df$adj.P.Val
+)
+
+peak_anno <- annotatePeak(
+  DARs_gr,
+  tssRegion = c(-3000, 3000),
+  TxDb = txdb,
+  annoDb = "org.Hs.eg.db",
+  assignGenomicAnnotation = TRUE
+)
+```
+
+```{r overlap-genes}
+.run_step("02 — overlap proximal DAR genes with DEGs")
+peak_anno_df <- as.data.frame(peak_anno)
+proximal <- peak_anno_df %>% filter(abs(.data$distanceToTSS) <= 50000)
+
+DAR_genes <- proximal %>%
+  dplyr::select(peak_id = .data$peak_id, SYMBOL = .data$SYMBOL, atac_lfc = .data$atac_lfc, atac_q = .data$atac_q) %>%
+  filter(!is.na(.data$SYMBOL)) %>%
+  group_by(.data$SYMBOL) %>%
+  slice_max(abs(.data$atac_lfc), n = 1) %>%
+  ungroup()
+
+DEGs_symbols <- sig_rna %>%
+  transmute(SYMBOL = .data$SYMBOL, rna_lfc = .data$logFC, rna_q = .data$adj.P.Val) %>%
+  filter(!is.na(.data$SYMBOL))
+
+overlap <- inner_join(DAR_genes, DEGs_symbols, by = "SYMBOL") %>%
+  mutate(
+    direction = case_when(
+      atac_lfc > 0 & rna_lfc > 0 ~ "open & up",
+      atac_lfc < 0 & rna_lfc < 0 ~ "closed & down",
+      atac_lfc > 0 & rna_lfc < 0 ~ "open & down",
+      atac_lfc < 0 & rna_lfc > 0 ~ "closed & up",
+      TRUE ~ NA_character_
+    )
+  )
+
+knitr::kable(as.data.frame(table(overlap$direction)))
+```
+
+```{r venn}
+.run_step("02 — Venn diagram")
+invisible(utils::capture.output(
+  venn.diagram(
+    x = list(
+      "DAR-proximal genes" = unique(DAR_genes$SYMBOL),
+      "DEGs" = unique(DEGs_symbols$SYMBOL)
+    ),
+    filename = file.path(out_dir, "venn_DAR_DEG_effector_CD4.png"),
+    imagetype = "png",
+    fill = c("#4e79a7", "#f28e2b"),
+    alpha = 0.5,
+    cat.cex = 1.2,
+    main = "Effector CD4+ (limma-voom)"
+  )
+))
+knitr::include_graphics(file.path(out_dir, "venn_DAR_DEG_effector_CD4.png"))
+```
+
+```{r scatter-integration, fig.width=7, fig.height=7}
+.run_step("02 — integration scatter")
+direction_colors <- c(
+  "open & up" = "#d62728",
+  "closed & down" = "#1f77b4",
+  "open & down" = "#ff7f0e",
+  "closed & up" = "#9467bd"
+)
+
+if (nrow(overlap) > 1L) {
+  p_scatter <- ggplot(overlap, aes(atac_lfc, rna_lfc, color = direction, label = SYMBOL)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+    geom_point(alpha = 0.65, size = 2) +
+    ggrepel::geom_text_repel(
+      data = overlap %>%
+        mutate(combined = abs(.data$atac_lfc) + abs(.data$rna_lfc)) %>%
+        slice_max(.data$combined, n = 20),
+      size = 3,
+      max.overlaps = 20
+    ) +
+    scale_color_manual(values = direction_colors) +
+    annotate(
+      "text",
+      x = min(overlap$atac_lfc, na.rm = TRUE) * 0.9,
+      y = max(overlap$rna_lfc, na.rm = TRUE) * 0.9,
+      label = paste0("r = ", round(cor(overlap$atac_lfc, overlap$rna_lfc), 2)),
+      size = 4
+    ) +
+    labs(
+      title = "ATAC vs RNA integration (proximal DAR genes)",
+      x = "ATAC log2FC",
+      y = "RNA log2FC"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+  print(p_scatter)
+  ggsave(file.path(out_dir, "scatter_ATAC_RNA_effector_CD4.pdf"), p_scatter, width = 7, height = 7)
+} else {
+  knitr::asis_output("_Too few overlapping genes._")
+}
+```
+
+# Paper Supplementary Data 3 & 4 — ranks vs replication
+
+```{r load-paper-tables}
+.run_step("02 — read paper supplementary DE/DA tables")
+paper_atac <- read.table(path_paper_atac, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+paper_rna <- read.table(path_paper_rna, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+if ("peak_id" %in% names(paper_rna) && !"gene_id" %in% names(paper_rna)) {
+  names(paper_rna)[names(paper_rna) == "peak_id"] <- "gene_id"
+}
+
+paper_atac_cd4 <- paper_atac %>% filter(.data$contrast == paper_contrast)
+paper_rna_cd4 <- paper_rna %>% filter(.data$contrast == paper_contrast)
+
+paper_atac_cd4 <- paper_atac_cd4 %>%
+  mutate(
+    rank_score_paper = -log10(.data$adj.P.Val) * abs(.data$logFC),
+    paper_rank_atac = rank(-.data$rank_score_paper, ties.method = "min")
+  )
+
+paper_rna_cd4 <- paper_rna_cd4 %>%
+  mutate(
+    rank_score_paper = -log10(.data$adj.P.Val) * abs(.data$logFC),
+    paper_rank_rna = rank(-.data$rank_score_paper, ties.method = "min")
+  )
+
+cat("Paper rows Effector CD4+ — ATAC:", nrow(paper_atac_cd4), " RNA:", nrow(paper_rna_cd4), "\n")
+```
+
+```{r compare-atac-peaks}
+.run_step("02 — compare ATAC logFC to paper (joined peaks)")
+cmp_atac <- tt_atac %>%
+  mutate(
+    ours_rank = rank(-(-log10(.data$adj.P.Val) * abs(.data$logFC)), ties.method = "min")
+  ) %>%
+  inner_join(
+    paper_atac_cd4 %>% dplyr::select(peak_id = .data$peak_id, logFC_paper = .data$logFC, adj.P.Val_paper = .data$adj.P.Val, paper_rank_atac),
+    by = "peak_id"
+  )
+
+if (nrow(cmp_atac) > 10) {
+  ca <- cor(cmp_atac$logFC, cmp_atac$logFC_paper, use = "complete.obs")
+  cat("Pearson r (log2FC ours vs paper), ATAC peaks in both tables:", round(ca, 3), "\n")
+}
+
+sig_ids <- sig_atac$peak_id
+top_compare_atac <- cmp_atac %>%
+  filter(.data$peak_id %in% sig_ids) %>%
+  arrange(.data$ours_rank) %>%
+  dplyr::select(peak_id, logFC, adj.P.Val, ours_rank, logFC_paper, adj.P.Val_paper, paper_rank_atac) %>%
+  head(25)
+knitr::kable(top_compare_atac, caption = "Top 25 significant DARs here — paper ranks (Supp. Data 3)")
+```
+
+```{r compare-rna-genes}
+.run_step("02 — compare RNA logFC to paper (ENSEMBL join)")
+cmp_rna <- tt_rna %>%
+  filter(!is.na(.data$ENSEMBL)) %>%
+  mutate(
+    ours_rank = rank(-(-log10(.data$adj.P.Val) * abs(.data$logFC)), ties.method = "min")
+  ) %>%
+  inner_join(
+    paper_rna_cd4 %>%
+      transmute(
+        ENSEMBL = as.character(.data$gene_id),
+        logFC_paper = .data$logFC,
+        adj.P.Val_paper = .data$adj.P.Val,
+        paper_rank_rna
+      ),
+    by = "ENSEMBL"
+  )
+
+if (nrow(cmp_rna) > 10) {
+  cr <- cor(cmp_rna$logFC, cmp_rna$logFC_paper, use = "complete.obs")
+  cat("Pearson r (log2FC ours vs paper), RNA genes (ENSEMBL match):", round(cr, 3), "\n")
+}
+
+sig_ens <- sig_rna$ENSEMBL[!is.na(sig_rna$ENSEMBL)]
+top_compare_rna <- cmp_rna %>%
+  filter(.data$ENSEMBL %in% sig_ens) %>%
+  arrange(.data$ours_rank) %>%
+  dplyr::select(ENSEMBL, SYMBOL, logFC, adj.P.Val, ours_rank, logFC_paper, adj.P.Val_paper, paper_rank_rna) %>%
+  head(25)
+knitr::kable(top_compare_rna, caption = "Top 25 significant DEGs here — paper ranks (Supp. Data 4)")
+```
+
+```{r paper-missed-note}
+cat(
+  "\nNote: genes without 1:1 ENSEMBL mapping from Entrez are excluded from RNA join.",
+  "\nATAC join requires identical peak_id strings between GEO counts and paper table.\n"
+)
+```
+
+# Summary
+
+```{r summary}
+.run_step("02 — summary")
+cat(
+  "ATAC peaks tested:", nrow(atac_sub),
+  "\nDARs q<0.01 |logFC|>1:", nrow(sig_atac),
+  "\nRNA genes tested:", nrow(rna_sub),
+  "\nDEGs q<0.01 |logFC|>1:", nrow(sig_rna),
+  "\nOverlap genes (proximal):", nrow(overlap),
+  "\nResults:", normalizePath(out_dir), "\n"
+)
+```
+
+```{r session-info}
+.run_step("02 — sessionInfo()")
+sessionInfo()
+```

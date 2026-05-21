@@ -1,0 +1,275 @@
+---
+title: "Final analysis (1/2) — Inspect count matrices, gene names, metadata, Effector CD4+ subset"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.path = "results/figure-html-01/",
+  dpi = 120
+)
+dir.create("results/figure-html-01/", recursive = TRUE, showWarnings = FALSE)
+dir.create("exported", showWarnings = FALSE)
+
+## Standalone repo: `data/` here. Nested in larger project: `../data/`.
+repo_root <- if (dir.exists("data")) normalizePath(".") else normalizePath("..")
+if (!dir.exists(file.path(repo_root, "data"))) {
+  stop("Place GEO count matrices in data/ (see data/README.md).")
+}
+
+if (!rmarkdown::pandoc_available()) {
+  for (brew_bin in c("/opt/homebrew/bin", "/usr/local/bin")) {
+    if (file.exists(file.path(brew_bin, "pandoc"))) {
+      Sys.setenv(PATH = paste(brew_bin, Sys.getenv("PATH"), sep = .Platform$path.sep))
+      break
+    }
+  }
+}
+
+## Visible in Console + HTML while knitting (so long steps are not “silent”).
+.run_step <- function(label) {
+  cat("\n[", format(Sys.time(), "%H:%M:%S"), "] ", label, "\n", sep = "")
+  flush.console()
+}
+```
+
+This notebook loads **ATAC** and **RNA raw counts**, renames RNA columns **GSM → `sample_id`**, rebuilds **`final_analysis/sample_metadata.txt`** from the supplementary QC sheet, and exports **Effector CD4+** sample IDs for **`02_effector_cd4_limma_PCA_integration.Rmd`**. **Gene-level annotation (Entrez → SYMBOL / GENETYPE / ENSEMBL) is deferred to notebook 02** and applied only to genes that pass the RNA **CPM** filter, matching the earlier atlas notebooks’ strategy (no whole-matrix `mapIds` on ~40k IDs).
+
+**Runtime:** this notebook should finish in **under a minute** (peek-only matrix I/O, no full ATAC/RNA decompression for row counts). **Where to watch progress:** in RStudio use **Knit** and watch the **R Markdown** jobs pane; from the shell use `rmarkdown::render("01_matrices_metadata.Rmd", quiet = FALSE)` so knitr prints **`i/n [chunk-name]`** as each chunk runs. Chunks also call **`.run_step("…")`** (timestamps appear in the rendered HTML code output).
+
+```{r libraries}
+library(readxl)
+library(dplyr)
+library(knitr)
+library(org.Hs.eg.db) ## only for small preview chunk below
+```
+
+# Paths
+
+```{r paths}
+.run_step("01 — paths and file checks")
+path_atac <- file.path(repo_root, "data", "GSE118189_ATAC_counts.txt.gz")
+path_rna_gz <- file.path(repo_root, "data", "GSE118165_raw_counts_GRCh38.p13_NCBI.tsv.gz")
+path_rna_plain <- file.path(repo_root, "data", "GSE118165_raw_counts_GRCh38.p13_NCBI.tsv")
+path_gsm_map <- file.path(repo_root, "data", "GSE118165_GSM_to_sample_id.tsv")
+path_xlsx <- file.path(repo_root, "data", "Supplementary_tables.xlsx")
+qc_sheet <- "ATAC-seq samle QC"
+path_meta_out <- if (repo_root == normalizePath(".")) "sample_metadata.txt" else file.path(repo_root, "final_analysis", "sample_metadata.txt")
+path_cd4_samples <- file.path(if (repo_root == normalizePath(".")) "exported" else file.path(repo_root, "final_analysis", "exported"), "effector_cd4_sample_ids.txt")
+
+path_rna <- if (file.exists(path_rna_gz)) path_rna_gz else path_rna_plain
+rna_open <- if (grepl("\\.gz$", path_rna)) function() gzfile(path_rna, "rt") else function() file(path_rna, "rt")
+
+stopifnot(
+  file.exists(path_atac),
+  file.exists(path_rna),
+  file.exists(path_gsm_map),
+  file.exists(path_xlsx)
+)
+```
+
+# ATAC matrix — structure
+
+```{r atac-inspect}
+.run_step("01 — ATAC: peek (header + 8 rows only)")
+atac_header <- read.table(
+  gzfile(path_atac),
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE,
+  nrows = 1L
+)
+atac_samples <- colnames(atac_header)
+
+atac_peek <- read.table(
+  gzfile(path_atac),
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE,
+  nrows = 8L
+)
+
+## Row counts: omit full-file line counts (gunzip | wc -l on multi‑GB tables can take many minutes).
+n_atac_rows <- NA_integer_
+
+kable(data.frame(
+  file = basename(path_atac),
+  n_peaks = n_atac_rows,
+  n_samples = length(atac_samples)
+), caption = "ATAC count matrix (n_peaks omitted in this notebook to avoid decompressing the entire file; see `dim(atac_full)` in notebook 02 after load)")
+
+cat("\nExample peak IDs (row names):\n")
+print(head(rownames(atac_peek), 5))
+
+cat("\nExample sample columns:\n")
+print(head(atac_samples, 10))
+
+cat("\nCorner: 6 peaks × 6 samples\n")
+print(atac_peek[, head(colnames(atac_peek), 6), drop = FALSE])
+```
+
+# RNA raw counts — GSM → `sample_id`, structure
+
+```{r rna-load-rename}
+.run_step("01 — RNA: peek (header + 12 rows), GSM → sample_id")
+rna_header <- read.table(
+  rna_open(),
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE,
+  nrows = 1L
+)
+gsm_map <- read.table(path_gsm_map, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+stopifnot(all(colnames(rna_header) %in% gsm_map$GSM))
+
+rna_peek <- read.table(
+  rna_open(),
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE,
+  nrows = 12L
+)
+colnames(rna_peek) <- gsm_map$sample_id[match(colnames(rna_peek), gsm_map$GSM)]
+
+n_rna_rows <- NA_integer_
+
+rna_samples <- gsm_map$sample_id[match(colnames(rna_header), gsm_map$GSM)]
+
+kable(data.frame(
+  file = basename(path_rna),
+  n_genes = n_rna_rows,
+  n_samples = length(rna_samples),
+  row_id_type = "NCBI Entrez GeneID"
+), caption = "RNA raw count matrix (n_genes omitted here to avoid streaming the whole file; notebook 02 reports `nrow(rna_full)` after load)")
+
+cat("\nExample Entrez row names:\n")
+print(head(rownames(rna_peek), 8))
+
+cat("\nExample samples:\n")
+print(head(colnames(rna_peek), 8))
+
+cat("\nCorner: 8 genes × 6 samples (integer counts)\n")
+print(rna_peek[, head(colnames(rna_peek), 6), drop = FALSE])
+
+cat("\nValue summary (peek matrix):\n")
+print(summary(as.vector(as.matrix(rna_peek))))
+```
+
+# Gene IDs — preview only (full annotation in notebook 02 after CPM filter)
+
+```{r gene-annotation-preview}
+.run_step("01 — mapIds preview (~40 Entrez only)")
+## Small `mapIds` call on the peek matrix row names only (not the whole genome).
+prev_ids <- head(unique(rownames(rna_peek)), 40L)
+prev_sym <- mapIds(org.Hs.eg.db, prev_ids, "SYMBOL", "ENTREZID", multiVals = "first")
+kable(
+  data.frame(ENTREZID = prev_ids, SYMBOL = unname(prev_sym), stringsAsFactors = FALSE),
+  caption = "Example Entrez → SYMBOL (notebook 02 annotates only CPM-passing genes)"
+)
+```
+
+# Overlap ATAC vs RNA column names
+
+```{r overlap-cols}
+.run_step("01 — sample ID overlap ATAC vs RNA")
+in_both <- intersect(atac_samples, rna_samples)
+kable(data.frame(
+  n_atac_only = length(setdiff(atac_samples, rna_samples)),
+  n_rna_only = length(setdiff(rna_samples, atac_samples)),
+  n_both = length(in_both)
+))
+```
+
+# Supplementary QC → `sample_metadata.txt`
+
+```{r build-metadata}
+.run_step("01 — build sample_metadata.txt from supplementary QC")
+qc <- read_excel(path_xlsx, sheet = qc_sheet)
+
+qc_use <- qc %>%
+  mutate(
+    condition = case_when(
+      .data$condition == "U" ~ "resting",
+      .data$condition == "S" ~ "stimulated",
+      TRUE ~ NA_character_
+    ),
+    in_atac = .data$sample %in% atac_samples,
+    in_rna = .data$sample %in% rna_samples
+  )
+
+bad_cond <- qc_use %>% filter(is.na(.data$condition))
+if (nrow(bad_cond) > 0) {
+  print(unique(qc$condition))
+  stop("Unexpected condition codes (expected U / S).")
+}
+
+meta_out <- qc_use %>%
+  transmute(
+    sample_id = .data$sample,
+    cell_type = .data$cell_type,
+    condition = .data$condition,
+    donor = .data$donor,
+    in_atac = .data$in_atac,
+    in_rna = .data$in_rna
+  ) %>%
+  arrange(.data$cell_type, .data$donor, .data$condition)
+
+write.table(
+  meta_out,
+  file = path_meta_out,
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+cat("Wrote", nrow(meta_out), "rows →", path_meta_out, "\n")
+
+meta_check <- read.table(
+  path_meta_out,
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE
+)
+stopifnot(all(meta_check$in_atac == (rownames(meta_check) %in% atac_samples)))
+stopifnot(all(meta_check$in_rna == (rownames(meta_check) %in% rna_samples)))
+
+kable(head(meta_check, 12), caption = "sample_metadata.txt (read-back)")
+```
+
+# Effector CD4+ samples for notebook 02
+
+```{r effector-cd4-export}
+.run_step("01 — export Effector CD4+ sample list for notebook 02")
+cd4_all <- rownames(meta_check)[meta_check$cell_type == "Effector_CD4pos_T"]
+cd4_joint <- intersect(
+  intersect(cd4_all, atac_samples),
+  rna_samples
+)
+
+writeLines(cd4_joint, path_cd4_samples)
+cat("Effector CD4+ samples (in both matrices):", length(cd4_joint), "\n")
+kable(as.data.frame.matrix(table(
+  meta_check[cd4_joint, "donor", drop = TRUE],
+  meta_check[cd4_joint, "condition", drop = TRUE]
+)), caption = "Donor × condition (Effector CD4+, both assays)")
+
+cat("\nWrote:", path_cd4_samples, "\n")
+```
+
+# Session info
+
+```{r session-info}
+.run_step("01 — sessionInfo()")
+sessionInfo()
+```

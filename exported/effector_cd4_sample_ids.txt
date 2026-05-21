@@ -1,0 +1,6 @@
+1001-Effector_CD4pos_T-U
+1001-Effector_CD4pos_T-S
+1002-Effector_CD4pos_T-S
+1003-Effector_CD4pos_T-U
+1003-Effector_CD4pos_T-S
+1004-Effector_CD4pos_T-U
