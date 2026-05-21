@@ -2,8 +2,6 @@
 
 Re-analysis of **stimulated vs resting Effector CD4⁺ T cells** from the human immune cell atlas ([Calderon et al.](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE118165); ATAC [GSE118189](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE118189)), using **GEO raw count matrices** and methods aligned to the paper (**TMM**, **voom**, **limma**, BH *q* &lt; 0.01, |log₂FC| &gt; 1).
 
-**Author:** [Mrunali Thokadiwala](https://github.com/emrunali)
-
 ---
 
 ## What this repository contains
@@ -143,7 +141,7 @@ Directional overlap (proximal DAR gene × DEG, *n* = 129):
 
 ## Citation
 
-1. Calderon D, Nguyen MLT, Mezger A, Kathiria A, Müller F, Nguyen V, Lescano N, Wu B, Trombetta J, Ribado JV, Knowles DA, Gao Z, Blaeschke F, Parent AV, Burt TD, Anderson MS, Criswell LA, Greenleaf WJ, Marson A, Pritchard JK. Landscape of stimulation-responsive chromatin across diverse human immune cells. Nat Genet. 2019 Oct;51(10):1494-1505. doi: [10.1038/s41588-019-0505-9] (https://pmc.ncbi.nlm.nih.gov/articles/PMC6858557/). Epub 2019 Sep 30. PMID: 31570894; PMCID: PMC6858557.
+1. Calderon D, Nguyen MLT, Mezger A, Kathiria A, Müller F, Nguyen V, Lescano N, Wu B, Trombetta J, Ribado JV, Knowles DA, Gao Z, Blaeschke F, Parent AV, Burt TD, Anderson MS, Criswell LA, Greenleaf WJ, Marson A, Pritchard JK. Landscape of stimulation-responsive chromatin across diverse human immune cells. Nat Genet. 2019 Oct;51(10):1494-1505. doi: [10.1038/s41588-019-0505-9](https://pmc.ncbi.nlm.nih.gov/articles/PMC6858557/). Epub 2019 Sep 30. PMID: 31570894; PMCID: PMC6858557.
 
 Note: If you use this code, please cite the original atlas publication and GEO accessions **GSE118165** (RNA) and **GSE118189** (ATAC).
 
