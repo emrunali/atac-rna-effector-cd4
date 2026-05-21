@@ -13,9 +13,10 @@ Re-analysis of **stimulated vs resting Effector CD4⁺ T cells** from the human 
 | `01_matrices_metadata.html` / `02_effector_cd4_limma_PCA_integration.html` | Pre-rendered reports (open in a browser) |
 | `results/` | PCA, volcano, Venn, and integration figures (PDF/PNG) |
 | `sample_metadata.txt` | Sample × cell type × condition × assay flags |
-| `Supplementary_data_4_RNA_stimulation_DE_genes.txt` | Paper RNA DE table (for rank / logFC comparison) |
+| `Supplementary_data_3_ATAC_stimulation_DA_peaks.txt` | Paper ATAC DA table (~40 MB; peak-level logFC comparison) |
+| `Supplementary_data_4_RNA_stimulation_DE_genes.txt` | Paper RNA DE table (gene-level logFC comparison) |
 
-Large inputs are **not** committed: see [`data/README.md`](data/README.md).
+GEO count matrices and `Supplementary_tables.xlsx` are **not** committed: see [`data/README.md`](data/README.md).
 
 ---
 
@@ -28,12 +29,9 @@ cd atac-rna-effector-cd4
 
 # 2. Download GEO / supplementary files into data/ (see data/README.md)
 
-# 3. (Optional) Download paper ATAC supplementary peak table to repo root:
-#    Supplementary_data_3_ATAC_stimulation_DA_peaks.txt
+# 3. Install R packages (Bioconductor): limma, edgeR, ChIPseeker, TxDb.Hsapiens.UCSC.hg19.knownGene, org.Hs.eg.db, ...
 
-# 4. Install R packages (Bioconductor): limma, edgeR, ChIPseeker, TxDb.Hsapiens.UCSC.hg19.knownGene, org.Hs.eg.db, ...
-
-# 5. Render notebooks (watch chunk progress with quiet = FALSE)
+# 4. Render notebooks (watch chunk progress with quiet = FALSE)
 Rscript -e 'rmarkdown::render("01_matrices_metadata.Rmd", quiet = FALSE)'
 Rscript -e 'rmarkdown::render("02_effector_cd4_limma_PCA_integration.Rmd", quiet = FALSE)'
 ```
@@ -133,6 +131,7 @@ Directional overlap (proximal DAR gene × DEG, *n* = 129):
 ├── data/
 │   ├── README.md
 │   └── GSE118165_GSM_to_sample_id.tsv
+├── Supplementary_data_3_ATAC_stimulation_DA_peaks.txt
 ├── Supplementary_data_4_RNA_stimulation_DE_genes.txt
 └── results/
 ```

@@ -18,6 +18,3 @@ data/GSE118189_ATAC_counts.txt.gz
 data/GSE118165_raw_counts_GRCh38.p13_NCBI.tsv
 data/GSE118165_raw_counts_GRCh38.p13_NCBI.tsv.gz
 data/Supplementary_tables.xlsx
-
-# Large paper supplementary peak table (~40 MB; download from publication)
-Supplementary_data_3_ATAC_stimulation_DA_peaks.txt
